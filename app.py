@@ -11,7 +11,7 @@ st.set_page_config(
 
 st.title("📊 多维电商业务智能分析看板")
 st.markdown(
-    "请在下方侧边栏依次上传 **4个核心数据Excel表格**，系统将自动进行数据清洗、关联与多维度看板渲染。"
+    "请在下方侧边栏依次上传 **4个核心数据Excel表格**，系统将自动进行列名清洗、容错关联与多维度看板渲染。"
 )
 
 # ==================== 1. 文件上传区 ====================
@@ -40,6 +40,21 @@ def load_data(sales_f, rtv_f, cost_f, ad_f):
   df_cost = pd.read_excel(cost_f)
   df_ad = pd.read_excel(ad_f)
 
+  # 清洗所有表的列名空格，避免 KeyError
+  for df in [df_sales, df_rtv, df_cost, df_ad]:
+    df.columns = df.columns.astype(str).str.strip()
+
+  # 成本表列名适配容错处理
+  cost_col_map = {}
+  for col in df_cost.columns:
+    if "SKU" in col.upper():
+      cost_col_map[col] = "SKU"
+    elif "成本" in col:
+      cost_col_map[col] = "产品成本价"
+    elif "头程" in col:
+      cost_col_map[col] = "头程运费"
+  df_cost = df_cost.rename(columns=cost_col_map)
+
   # 数据预处理：统一日期格式
   df_sales["Order Date"] = pd.to_datetime(
       df_sales["Order Date"], errors="coerce"
@@ -59,11 +74,8 @@ df_sales, df_rtv, df_cost, df_ad = load_data(
 )
 
 if df_sales is None:
-  st.warning(
-      "⚠️ 请先在左侧边栏完整上传所有 4 个 Excel 表格以加载所有业务看板。"
-  )
+  st.warning("⚠️ 请先在左侧边栏完整上传所有 4 个 Excel 表格以加载所有业务看板。")
 else:
-  # 选项卡设计
   tabs = st.tabs(
       [
           "1. 销售总看板",
@@ -79,13 +91,11 @@ else:
   with tabs[0]:
     st.header("📈 整体销售数据分析看板")
 
-    # 核心指标计算
-    total_sales = df_sales["Total Cost"].sum()  # 视Total Cost为销售额
+    total_sales = df_sales["Total Cost"].sum()
     total_qty = df_sales["Quantity"].sum()
     total_orders = df_sales["Customer Order Number"].nunique()
     avg_order_value = total_sales / total_orders if total_orders > 0 else 0
 
-    # 计算日均销量与销售天数
     min_date = df_sales["Order Date"].min()
     max_date = df_sales["Order Date"].max()
     date_diff = (
@@ -103,7 +113,6 @@ else:
     st.markdown("---")
     st.subheader("月度销售趋势分析")
 
-    # 月度聚合
     monthly_sales = (
         df_sales.groupby("Month")
         .agg(
@@ -117,7 +126,6 @@ else:
         monthly_sales["总销售额"] / monthly_sales["总单量"]
     )
 
-    # 计算每月天数以得出月日均销量
     days_in_month = (
         df_sales.groupby("Month")["Order Date"]
         .apply(lambda x: (x.max() - x.min()).days + 1)
@@ -126,7 +134,6 @@ else:
     monthly_sales = pd.merge(monthly_sales, days_in_month, on="Month")
     monthly_sales["日均销量"] = monthly_sales["总销量"] / monthly_sales["Days"]
 
-    # 柱状图展示
     metric_choice = st.selectbox(
         "选择展示指标图表",
         ["总销售额", "总销量", "总单量", "平均客单价", "日均销量"],
@@ -148,22 +155,15 @@ else:
   with tabs[1]:
     st.header("📦 产品 SKU 维度多维分析看板")
 
-    # 搜索SKU功能
-    all_skus = df_sales["产品SKU"].dropna().unique().tolist()
+    all_skus = sorted(df_sales["产品SKU"].dropna().unique().tolist())
     search_sku = st.selectbox(
-        "🔍 搜索或选择单个产品SKU（留空或全选看整体）",
-        options=["全部SKU"] + all_skus,
+        "🔍 请选择或搜索单个产品SKU（查看该SKU详细月度变化趋势）",
+        options=all_skus,
     )
 
-    filtered_sales = df_sales.copy()
-    if search_sku != "全部SKU":
-      filtered_sales = filtered_sales[filtered_sales["产品SKU"] == search_sku]
-
-    # SKU 聚合汇总
+    # 1. 汇总表格
     sku_summary = (
-        filtered_sales.groupby(
-            ["产品SKU", "产品名称", "品牌", "运营"]
-        )
+        df_sales.groupby(["产品SKU", "产品名称", "品牌", "运营"])
         .agg(
             总销售额=("Total Cost", "sum"),
             总销量=("Quantity", "sum"),
@@ -183,10 +183,9 @@ else:
         else 0
     )
 
-    # 排名与等级划分（基于销售额ABC分级简单模拟：前20% A级，20-50% B级，其余C/D级）
-    sku_summary = sku_summary.sort_values(by="总销售额", ascending=False).reset_index(
-        drop=True
-    )
+    sku_summary = sku_summary.sort_values(
+        by="总销售额", ascending=False
+    ).reset_index(drop=True)
     sku_summary["每月排名"] = sku_summary.index + 1
 
 
@@ -208,33 +207,47 @@ else:
 
     st.dataframe(sku_summary, use_container_width=True)
 
-    # SKU 月度变化趋势
-    st.subheader("📅 SKU 月度趋势分析（柱状图）")
+    # 2. 针对单个SKU展示清爽的每月销量/销售额变化柱状趋势图
+    st.markdown("---")
+    st.subheader(f"📅 单个 SKU [{search_sku}] 的月度变化趋势")
+
+    sku_filtered = df_sales[df_sales["产品SKU"] == search_sku]
     sku_monthly = (
-        filtered_sales.groupby(["Month", "产品SKU"])
-        .agg(总销售额=("Total Cost", "sum"), 总销量=("Quantity", "sum"))
+        sku_filtered.groupby("Month")
+        .agg(
+            月总销售额=("Total Cost", "sum"),
+            月总销量=("Quantity", "sum"),
+            月总单量=("Customer Order Number", "nunique"),
+        )
         .reset_index()
     )
 
-    if search_sku != "全部SKU":
-      sku_m_filtered = sku_monthly[sku_monthly["产品SKU"] == search_sku]
-      fig_sku = px.bar(
-          sku_m_filtered,
-          x="Month",
-          y="总销售额",
-          title=f"SKU: {search_sku} - 月度销售额变化趋势",
-          text_auto=True,
-      )
-      st.plotly_chart(fig_sku, use_container_width=True)
-    else:
-      fig_sku_all = px.bar(
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+      fig_sku_qty = px.bar(
           sku_monthly,
           x="Month",
-          y="总销售额",
-          color="产品SKU",
-          title="全量SKU每月销售额分布柱状图",
+          y="月总销量",
+          text="月总销量",
+          title=f"SKU: {search_sku} - 逐月销量变化柱状图",
+          color_discrete_sequence=["#2b5c8f"],
       )
-      st.plotly_chart(fig_sku_all, use_container_width=True)
+      fig_sku_qty.update_traces(textposition="outside")
+      st.plotly_chart(fig_sku_qty, use_container_width=True)
+
+    with col_m2:
+      fig_sku_amt = px.bar(
+          sku_monthly,
+          x="Month",
+          y="月总销售额",
+          text="月总销售额",
+          title=f"SKU: {search_sku} - 逐月销售额变化柱状图",
+          color_discrete_sequence=["#2ca02c"],
+      )
+      fig_sku_amt.update_traces(
+          texttemplate="%{text:.2s}", textposition="outside"
+      )
+      st.plotly_chart(fig_sku_amt, use_container_width=True)
 
   # ==================== 看板三：以运营为维度 ====================
   with tabs[2]:
@@ -266,19 +279,16 @@ else:
   with tabs[3]:
     st.header("🔄 退货与扣款多维看板")
 
-    # 整体退货数据汇总
     total_rtv_qty = df_rtv["QTY"].sum()
     total_deduction = df_rtv["总扣款"].sum()
     total_sales_qty_all = df_sales["Quantity"].sum()
     total_sales_amt_all = df_sales["Total Cost"].sum()
 
-    # 退货率算法1（数量）：退货总件数 / 销售总件数
     rtv_rate_qty = (
         total_rtv_qty / total_sales_qty_all * 100
         if total_sales_qty_all > 0
         else 0
     )
-    # 退货率算法2（金额）：退货总成本/扣款金额 vs 销售总额（此处以总扣款/销售总额或退货Total Cost替代）
     rtv_total_cost = df_rtv["Total Cost"].sum()
     rtv_rate_amt = (
         rtv_total_cost / total_sales_amt_all * 100
@@ -289,12 +299,16 @@ else:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("总退货件数", f"{total_rtv_qty:,}")
     c2.metric("总扣款金额 ($)", f"{total_deduction:,.2f}")
-    c3.metric("数量退货率 (%)", f"{rtv_rate_qty:.2f}%")
-    c4.metric("金额退货率 (%)", f"{rtv_rate_amt:.2f}%")
+    c3.metric("整体数量退货率 (%)", f"{rtv_rate_qty:.2f}%")
+    c4.metric("整体金额退货率 (%)", f"{rtv_rate_amt:.2f}%")
 
     st.markdown("---")
-    tab_rtv_1, tab_rtv_2 = st.tabs(
-        ["📌 按订单日期明细 (Order Date视角)", "📌 按退货日期明细 (RTV Date视角)"]
+    tab_rtv_1, tab_rtv_2, tab_rtv_3 = st.tabs(
+        [
+            "📌 按订单日期明细 (Order Date视角)",
+            "📌 按退货日期明细 (RTV Date视角)",
+            "📦 SKU × 月份退货率明细",
+        ]
     )
 
     with tab_rtv_1:
@@ -329,11 +343,59 @@ else:
       )
       st.plotly_chart(fig_r2, use_container_width=True)
 
+    with tab_rtv_3:
+      st.subheader("📦 每个产品 SKU 在每个月的退货率明细（双算法）")
+      # 按产品SKU与RTV月份聚合退货数据
+      rtv_sku_month = (
+          df_rtv.groupby(["RTV_Month", "产品SKU"])
+          .agg(退货件数=("QTY", "sum"), 退货金额cost=("Total Cost", "sum"))
+          .reset_index()
+      )
+      # 按产品SKU与销售月份聚合销售数据
+      sales_sku_month = (
+          df_sales.groupby(["Month", "产品SKU"])
+          .agg(销售件数=("Quantity", "sum"), 销售金额=("Total Cost", "sum"))
+          .reset_index()
+      )
+
+      # 合并计算SKU月度退货率
+      sku_rtv_merged = pd.merge(
+          sales_sku_month,
+          rtv_sku_month,
+          left_on=["Month", "产品SKU"],
+          right_on=["RTV_Month", "产品SKU"],
+          how="left",
+      ).fillna({"退货件数": 0, "退货金额cost": 0})
+
+      sku_rtv_merged["数量退货率(%)"] = (
+          sku_rtv_merged["退货件数"] / sku_rtv_merged["销售件数"] * 100
+      ).fillna(0)
+      sku_rtv_merged["金额退货率(%)"] = (
+          sku_rtv_merged["退货金额cost"] / sku_rtv_merged["销售金额"] * 100
+      ).fillna(0)
+
+      sku_rtv_display = sku_rtv_merged[
+          [
+              "Month",
+              "产品SKU",
+              "销售件数",
+              "退货件数",
+              "数量退货率(%)",
+              "销售金额",
+              "退货金额cost",
+              "金额退货率(%)",
+          ]
+      ].rename(columns={"Month": "月份"})
+
+      st.dataframe(
+          sku_rtv_display.sort_values(by=["月份", "产品SKU"]),
+          use_container_width=True,
+      )
+
   # ==================== 看板五：广告数据分析 ====================
   with tabs[4]:
     st.header("🎯 广告数据分析看板")
 
-    # 汇总广告指标
     total_spend = df_ad["Spend"].sum()
     total_spa_rev = df_ad["SPA Revenue"].sum()
     total_clicks = df_ad["Clicks"].sum()
@@ -383,11 +445,9 @@ else:
         """
         **计算公式说明：**
         * 利润率 = $\\text{Cost(销售额)} - \\text{采购} - \\text{头程} - (\\text{cost} \\times \\text{退货率} + \\text{cost} \\times \\text{广告花费率} + \\text{cost} \\times 3.25\\% + \\text{cost} \\times 2\\%)$
-        * 注：系统将通过 SKU 关联产品成本表中的 `产品成本价` 与 `头程运费`，并自动匹配退货率与广告花费率进行多维计算。
         """
     )
 
-    # 数据表关联成本表
     merged_sales_cost = pd.merge(
         df_sales,
         df_cost,
@@ -396,39 +456,33 @@ else:
         how="left",
     ).fillna({"产品成本价": 0, "头程运费": 0})
 
-    # 计算整体汇总利润分析
     overall_revenue = merged_sales_cost["Total Cost"].sum()
-    total_procurement = (
-        merged_sales_cost["产品成本价"] * merged_sales_cost["Quantity"]
-    ).sum()
-    total_shipping = (
-        merged_sales_cost["头程运费"] * merged_sales_cost["Quantity"]
-    ).sum()
-
-    # 计算整体退货率和广告花费率作为默认比例
     overall_ad_spend = df_ad["Spend"].sum()
     global_ad_rate = (
         overall_ad_spend / overall_revenue if overall_revenue > 0 else 0
     )
-    global_rtv_rate = rtv_rate_amt / 100  # 使用前面算出的金额退货率
+    global_rtv_rate = rtv_rate_amt / 100
 
-    # 利润计算
-    platform_fee_rate = 0.0325  # 3.25%
-    other_fee_rate = 0.02  # 2%
+    platform_fee_rate = 0.0325
+    other_fee_rate = 0.02
 
-    # 按SKU维度汇总
     sku_profit = (
         merged_sales_cost.groupby(["产品SKU", "产品名称", "品牌"])
         .agg(
             销售额=("Total Cost", "sum"),
             总销量=("Quantity", "sum"),
-            采购成本=("产品成本价", lambda x: (x * merged_sales_cost.loc[x.index, "Quantity"]).sum()),
-            头程运费=("头程运费", lambda x: (x * merged_sales_cost.loc[x.index, "Quantity"]).sum()),
+            采购成本=(
+                "产品成本价",
+                lambda x: (x * merged_sales_cost.loc[x.index, "Quantity"]).sum(),
+            ),
+            头程运费=(
+                "头程运费",
+                lambda x: (x * merged_sales_cost.loc[x.index, "Quantity"]).sum(),
+            ),
         )
         .reset_index()
     )
 
-    # 简化的SKU级平摊计算
     sku_profit["退货成本项"] = sku_profit["销售额"] * global_rtv_rate
     sku_profit["广告成本项"] = sku_profit["销售额"] * global_ad_rate
     sku_profit["平台扣点项"] = sku_profit["销售额"] * platform_fee_rate
@@ -467,7 +521,6 @@ else:
         use_container_width=True,
     )
 
-    # 整体看板指标汇总
     total_gross_profit = sku_profit["毛利额"].sum()
     overall_margin = (
         total_gross_profit / overall_revenue * 100 if overall_revenue > 0 else 0
