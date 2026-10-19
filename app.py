@@ -200,7 +200,7 @@ with tabs[4]:
 
 with tabs[5]:
     st.header('💰 利润率与成本率深度分析（目标 ≥13%）')
-    st.caption('先计算全量SKU×月份利润底表，再筛选SKU。退货采用RTV Date视角的金额退货率；成本表字段：SKU、产品成本价、头程运费。')
+    st.caption('先对全部SKU、全部月份建立统一利润底表，再筛选SKU。成本表字段固定为：SKU、产品成本价、头程运费。')
     clean_cost = costs[['SKU', '产品成本价', '头程运费']].copy()
     clean_cost = clean_cost.dropna(subset=['SKU'])
     clean_cost = clean_cost[clean_cost['SKU'] != '']
@@ -224,18 +224,11 @@ with tabs[5]:
     platform_rate = st.sidebar.number_input('平台费率(%)', min_value=0.0, value=3.25, step=0.25) / 100
     other_rate = st.sidebar.number_input('其他费用率(%)', min_value=0.0, value=2.0, step=0.25) / 100
     base = full.groupby(['Month', '产品SKU'], dropna=False).agg(销售额=('Total Cost', 'sum'), 销量=('Quantity', 'sum'), 采购成本=('采购成本', 'sum'), 头程成本=('头程成本', 'sum'), 成本完整=('成本完整', 'all'), 零成本待核实=('零成本待核实', 'any')).reset_index()
-    # RTV视角：按实际退货日期所属月份与SKU归集，分母是该月同SKU销售额。
-    ret = rtv.groupby(['RTV_Month', '产品SKU'], dropna=False).agg(退货金额=('Total Cost', 'sum'), 退货件数=('QTY', 'sum'), RTV扣款=('总扣款', 'sum')).reset_index().rename(columns={'RTV_Month': 'Month'})
+    ret = rtv.groupby(['Order_Month', '产品SKU'], dropna=False).agg(退货金额=('Total Cost', 'sum'), 退货件数=('QTY', 'sum'), RTV扣款=('总扣款', 'sum')).reset_index().rename(columns={'Order_Month': 'Month'})
     base = base.merge(ret, on=['Month', '产品SKU'], how='left', validate='one_to_one')
     for field in ['退货金额', '退货件数', 'RTV扣款']:
         base[field] = base[field].fillna(0)
-    # RTV金额退货率(%) = 当月SKU退货金额 / 当月SKU销售额 × 100。
-    # 利润退货成本 = 当月SKU销售额 × RTV金额退货率；在分母有效时等于当月退货金额。
-    base['RTV金额退货率(%)'] = percent(base['退货金额'], base['销售额'])
-    base['退货成本'] = base['销售额'] * base['RTV金额退货率(%)'].fillna(0) / 100
-    # 销售额为零但发生RTV的月份不可计算费率，不能将该笔退货损失静默忽略。
-    base['RTV无销售额待核实'] = (base['销售额'] <= 0) & (base['退货金额'] != 0)
-    base.loc[base['RTV无销售额待核实'], '退货成本'] = base.loc[base['RTV无销售额待核实'], '退货金额']
+    base['退货成本'] = base['退货金额']
     base['广告成本'] = base['销售额'] * fixed_ad_rate
     base['平台扣点'] = base['销售额'] * platform_rate
     base['其他费用'] = base['销售额'] * other_rate
@@ -255,8 +248,6 @@ with tabs[5]:
     zeros = filtered.loc[filtered['零成本待核实'], '产品SKU'].dropna().unique().tolist()
     if missing:
         st.error(f'有{len(missing)}个SKU缺少采购成本或头程字段，已排除其利润计算：{missing[:25]}')
-    if filtered['RTV无销售额待核实'].any():
-        st.warning('部分SKU月份有RTV退货金额但没有正向销售额；该月份无法计算RTV金额退货率，退货金额已单列，不能用零退货率代替。')
     if zeros:
         st.warning(f'有{len(zeros)}个SKU的产品成本价为0，利润可能偏高，请核实：{zeros[:25]}')
     valid = filtered[filtered['成本完整'] & (filtered['销售额'] > 0)].copy()
@@ -301,7 +292,7 @@ with tabs[5]:
     sku_profit['预警状态'] = np.select([sku_profit['零成本待核实'], sku_profit['利润率(%)'] < 10, sku_profit['利润率(%)'] < 13], ['零成本待核实', '严重预警', '低于13%'], default='达标')
     table(sku_profit.sort_values('利润率(%)'))
     st.subheader('SKU × 月份利润明细')
-    table(filtered[['Month', '产品SKU', '产品名称', '品牌', '销售额', '销量', '采购成本', '头程成本', 'RTV金额退货率(%)', '退货成本', '广告成本', '平台扣点', '其他费用', '总成本', '利润额', '利润率(%)', '成本率(%)', '预警状态']].sort_values(['Month', '产品SKU']))
+    table(filtered[['Month', '产品SKU', '产品名称', '品牌', '销售额', '销量', '采购成本', '头程成本', '退货成本', '广告成本', '平台扣点', '其他费用', '总成本', '利润额', '利润率(%)', '成本率(%)', '预警状态']].sort_values(['Month', '产品SKU']))
     alerts = valid[valid['利润率(%)'] < 13].sort_values(['Month', '利润率(%)'])
     st.subheader(f'低于13%的SKU月度预警：{len(alerts)}条')
     table(alerts[['Month', '产品SKU', '销售额', '利润额', '利润率(%)', '成本率(%)', '预警状态']])
@@ -309,4 +300,4 @@ with tabs[5]:
     checks = pd.DataFrame({'检查项目': ['SKU汇总销售额', 'SKU汇总利润额', '月度汇总销售额', '月度汇总利润额'], '差异金额': [revenue - sku_profit['销售额'].sum(), profit - sku_profit['利润额'].sum(), revenue - monthly['月销售额'].sum(), profit - monthly['月利润额'].sum()]})
     checks['检查结果'] = np.where(checks['差异金额'].abs() < .01, '通过', '异常')
     table(checks)
-    st.caption('估算口径：采购及头程按单位成本×销量；广告按全量比例分摊；退货使用RTV Date实际退货月份，RTV金额退货率=当月SKU退货金额÷当月SKU销售额，退货成本=当月SKU销售额×RTV金额退货率。RTV总扣款不重复扣除。无销售额的RTV月份须单独核对。')
+    st.caption('估算口径：采购及头程按成本表单位金额×销量；广告按全量比例分摊；退货按原订单月份及SKU归属，以RTV Total Cost估算退货损失；RTV总扣款不再重复扣除。零成本记录请人工确认。')
