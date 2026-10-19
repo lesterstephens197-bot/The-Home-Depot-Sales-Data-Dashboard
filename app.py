@@ -81,7 +81,7 @@ if 'Customer Order Number' not in sales:
     sales['Customer Order Number'] = sales.index.astype(str)
 all_skus = sorted(set(sales['产品SKU'].dropna()) | set(rtv['产品SKU'].dropna()))
 
-tabs = st.tabs(['1. 销售总看板', '2. 产品SKU看板', '3. 运营维度看板', '4. 退货与扣款看板', '5. 广告数据分析看板', '6. 利润率与成本率看板', '7. Remittance毛利率核算'])
+tabs = st.tabs(['1. 销售总看板', '2. 产品SKU看板', '3. 运营维度看板', '4. 退货与扣款看板', '5. 广告数据分析看板', '6. 利润率与成本率看板', '7. Remittance毛利率核算', '8. 产品属性利润核算'])
 
 with tabs[0]:
     st.header('📈 整体销售数据分析')
@@ -520,3 +520,156 @@ with tabs[6]:
             if (rem_valid['费用分类'] == '其他/对账').any():
                 st.warning('Remittance存在未分类交易，未计入毛利率，请在对账表核实其业务性质。')
             st.caption('若需要严格的会计毛利率，后续还需核实跨期结算、广告SA与广告投放Spend差异、售后实际支出及成本表历史变价。')
+
+
+# ================================================================
+# 看板八：按销售表“产品属性”单独核算利润
+# 说明：前七个看板的计算代码不变；Remittance未提供属性字段，
+#       退款/佣金/广告按同月销售额占比分摊，属于管理估算口径。
+# ================================================================
+with tabs[7]:
+    st.header('🏷️ 产品属性利润核算（销售扶持 / 清库 / LA清仓 / 空白）')
+    st.caption('销售额、销量、采购成本和头程运费按销售明细的产品属性直接归属；Remittance退款、佣金和广告费按同月各属性销售额比例分摊。分摊属于估算，并非交易逐笔匹配。')
+
+    if '产品属性' not in sales.columns:
+        st.error('销售数据表缺少“产品属性”列，请确认表头。前七个看板不受影响。')
+    elif remittance_file is None:
+        st.info('请在左侧上传 Remittance 结算表，才能核算第八个看板。')
+    else:
+        rem8 = read_excel(remittance_file)
+        need8 = ['Doc Type', 'Transaction Value', 'Cash Discount Amount',
+                 'Payment/Chargeback Date', 'Reason Code']
+        miss8 = [c for c in need8 if c not in rem8.columns]
+        if miss8:
+            st.error(f'Remittance缺少必要字段：{miss8}')
+        else:
+            # 属性分类：空白单独保留，未知属性不擅自归并到四类。
+            sales8 = sales.copy()
+            attr8 = sales8['产品属性'].astype('string').str.strip()
+            attr8 = attr8.fillna('').replace({'nan': '', 'None': '', '<NA>': ''})
+            sales8['属性类别'] = attr8.replace({'': '空白'})
+            desired8 = ['销售扶持', '清库', 'LA清仓', '空白']
+            other8 = sorted(set(sales8['属性类别'].dropna()) - set(desired8))
+            if other8:
+                st.warning(f'发现额外的产品属性值，已单独保留而非合并：{other8}')
+
+            # 按销售明细直接归集成本，不能按SKU预先分组：同一SKU可属于不同属性。
+            unit8 = costs[['SKU', '产品成本价', '头程运费']].drop_duplicates('SKU', keep='first')
+            sales8 = sales8.merge(unit8, left_on='产品SKU', right_on='SKU',
+                                  how='left', validate='many_to_one')
+            sales8['成本完整'] = sales8['产品成本价'].notna() & sales8['头程运费'].notna()
+            sales8['采购成本'] = sales8['Quantity'] * sales8['产品成本价']
+            sales8['头程成本'] = sales8['Quantity'] * sales8['头程运费']
+            missing8 = sorted(sales8.loc[~sales8['成本完整'], '产品SKU'].dropna().unique().tolist())
+            if missing8:
+                st.error(f'以下{len(missing8)}个SKU缺少完整单位成本，相关属性月份不计算毛利率：{missing8[:30]}')
+
+            detail8 = (sales8.dropna(subset=['Month'])
+                       .groupby(['Month', '属性类别'], as_index=False)
+                       .agg(销售额=('Total Cost', 'sum'), 销量=('Quantity', 'sum'),
+                            采购成本=('采购成本', lambda x: x.sum(min_count=1)),
+                            头程运费=('头程成本', lambda x: x.sum(min_count=1)),
+                            成本完整=('成本完整', 'all')))
+            detail8['采购成本'] = detail8['采购成本'].where(detail8['成本完整'])
+            detail8['头程运费'] = detail8['头程运费'].where(detail8['成本完整'])
+
+            # Remittance分类与第七个看板保持一致：TRADE DISCOUNT优先，
+            # Cash Discount Amount独立取反后并入平台佣金，不重复扣除。
+            rem8 = rem8.copy()
+            rem8['Doc Type'] = rem8['Doc Type'].fillna('').astype(str).str.strip().str.upper()
+            rem8['Reason Code'] = rem8['Reason Code'].fillna('').astype(str).str.strip().str.upper()
+            rem8['Transaction Value'] = number(rem8['Transaction Value']).fillna(0)
+            rem8['Cash Discount Amount'] = number(rem8['Cash Discount Amount']).fillna(0)
+            rem8['Month'] = month(rem8['Payment/Chargeback Date'])
+            trade8 = rem8['Reason Code'].eq('*TRADE DISCOUNT')
+            refund8 = ~trade8 & rem8['Doc Type'].isin(['Z1', 'KG'])
+            ad8 = ~trade8 & rem8['Doc Type'].eq('SA')
+            rem8['退款费用'] = rem8['Transaction Value'].where(refund8, 0)
+            rem8['平台佣金'] = rem8['Transaction Value'].where(trade8, 0) - rem8['Cash Discount Amount']
+            rem8['广告费用'] = rem8['Transaction Value'].where(ad8, 0)
+            fee8 = (rem8.dropna(subset=['Month']).groupby('Month', as_index=False)
+                    [['退款费用', '平台佣金', '广告费用']].sum())
+
+            # 月份维度分摊：不跨月，不将费用重复计入多个属性。
+            total8 = detail8.groupby('Month', as_index=False)['销售额'].sum().rename(columns={'销售额': '月销售总额'})
+            detail8 = detail8.merge(total8, on='Month', how='left')
+            detail8['分摊比例(%)'] = percent(detail8['销售额'], detail8['月销售总额'])
+            detail8 = detail8.merge(fee8, on='Month', how='left')
+            for c in ['退款费用', '平台佣金', '广告费用']:
+                detail8[c] = detail8[c].fillna(0) * detail8['分摊比例(%)'] / 100
+
+            st.subheader('1. 售后费用设置')
+            after8 = st.number_input('售后预算费率（%）', min_value=0.0, max_value=100.0,
+                                     value=2.0, step=0.25, format='%.2f', key='attr_aftersale_rate')
+            st.caption('第八看板的售后费默认按各属性销售额的2%估算，可独立调整；不影响第七看板的售后设置。')
+            detail8['售后费用'] = detail8['销售额'] * after8 / 100
+            costs8 = ['退款费用', '平台佣金', '广告费用', '采购成本', '头程运费', '售后费用']
+            detail8['总成本支出'] = detail8[costs8].sum(axis=1, min_count=len(costs8))
+            detail8.loc[~detail8['成本完整'], '总成本支出'] = np.nan
+            detail8['毛利润'] = detail8['销售额'] - detail8['总成本支出']
+            detail8['毛利率(%)'] = percent(detail8['毛利润'], detail8['销售额'])
+            detail8['总成本率(%)'] = percent(detail8['总成本支出'], detail8['销售额'])
+            for c in costs8:
+                detail8[c + '率(%)'] = percent(detail8[c], detail8['销售额'])
+            detail8['13%目标差额'] = detail8['销售额'] * .87 - detail8['总成本支出']
+            detail8['核算状态'] = np.select(
+                [~detail8['成本完整'], detail8['销售额'] <= 0, detail8['毛利率(%)'] < 13],
+                ['成本缺失', '无有效销售额', '低于13%'], default='达标')
+
+            all_months8 = sorted(detail8['Month'].dropna().unique().tolist())
+            month_sel8 = st.multiselect('筛选月份（不选代表全部）', all_months8, key='attr_month_filter')
+            attr_sel8 = st.multiselect('筛选产品属性（不选代表全部）', desired8 + other8,
+                                       key='attr_category_filter')
+            view8 = detail8.copy()
+            if month_sel8:
+                view8 = view8[view8['Month'].isin(month_sel8)]
+            if attr_sel8:
+                view8 = view8[view8['属性类别'].isin(attr_sel8)]
+
+            st.subheader('2. 各产品属性毛利率总览')
+            def summarize8(g):
+                if not g['成本完整'].all() or (g['销售额'] <= 0).any():
+                    return pd.Series({'销售额': g['销售额'].sum(), '销量': g['销量'].sum(),
+                                      '总成本支出': np.nan, '毛利润': np.nan})
+                return pd.Series({'销售额': g['销售额'].sum(), '销量': g['销量'].sum(),
+                                  '总成本支出': g['总成本支出'].sum(), '毛利润': g['毛利润'].sum()})
+            if view8.empty:
+                st.info('当前筛选条件下暂无销售数据。')
+            else:
+                overview8 = view8.groupby('属性类别').apply(summarize8).reset_index()
+                overview8['毛利率(%)'] = percent(overview8['毛利润'], overview8['销售额'])
+                overview8['总成本率(%)'] = percent(overview8['总成本支出'], overview8['销售额'])
+                overview8['状态'] = np.where(overview8['毛利率(%)'].isna(), '待核查',
+                                        np.where(overview8['毛利率(%)'] >= 13, '达标', '低于13%'))
+                table(overview8.sort_values('销售额', ascending=False))
+                chart(overview8, '属性类别', '毛利率(%)', '不同产品属性毛利率对比')
+
+                st.subheader('3. 产品属性 × 月份利润核算明细')
+                show8 = ['Month', '属性类别', '销售额', '销量', '分摊比例(%)',
+                         '退款费用', '平台佣金', '广告费用', '采购成本', '头程运费', '售后费用',
+                         '总成本支出', '毛利润', '毛利率(%)', '总成本率(%)', '13%目标差额', '核算状态']
+                table(view8[show8].sort_values(['Month', '属性类别']))
+                trend8 = view8.dropna(subset=['毛利率(%)'])
+                if not trend8.empty:
+                    st.plotly_chart(px.bar(trend8, x='Month', y='毛利率(%)', color='属性类别',
+                                           barmode='group', title='产品属性月度毛利率对比'),
+                                    use_container_width=True)
+                st.subheader('4. 产品属性成本结构')
+                stack8 = view8.melt(id_vars=['Month', '属性类别'], value_vars=costs8,
+                                    var_name='费用项目', value_name='费用金额')
+                st.plotly_chart(px.bar(stack8, x='属性类别', y='费用金额', color='费用项目',
+                                       barmode='stack', title='各产品属性成本构成'),
+                                use_container_width=True)
+
+            st.subheader('5. 费用分摊核对及未分配月份')
+            allocation8 = detail8.groupby('Month', as_index=False)[['退款费用', '平台佣金', '广告费用']].sum()
+            audit8 = fee8.merge(allocation8, on='Month', how='left', suffixes=('_原始', '_已分摊'))
+            for c in ['退款费用', '平台佣金', '广告费用']:
+                audit8[c + '_已分摊'] = audit8[c + '_已分摊'].fillna(0)
+                audit8[c + '_差异'] = audit8[c + '_原始'] - audit8[c + '_已分摊']
+            if not audit8.empty:
+                table(audit8.sort_values('Month'))
+                has_unallocated8 = (audit8[[c + '_差异' for c in ['退款费用', '平台佣金', '广告费用']]].abs() > .01).any(axis=1)
+                if has_unallocated8.any():
+                    st.warning('部分月份存在Remittance费用但没有可用于分摊的正向销售额，或销售额净额为零；该部分费用未计入属性利润，请核对差异表。')
+            st.caption('重要：第八看板按销售属性单独归集收入与单位成本；Remittance缺少产品属性时，费用只能按月度销售额比例分摊。属性利润是管理估算值。若需要按真实退货/广告归属核算，应补充可匹配的订单号、SKU或费用归属字段。')
