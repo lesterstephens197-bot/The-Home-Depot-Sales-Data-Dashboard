@@ -350,7 +350,7 @@ with tabs[6]:
             if invalid_dates or invalid_amounts or invalid_cash7:
                 st.warning(f'Remittance中有 {invalid_dates} 行日期无效、{invalid_amounts} 行金额无效；Cash Discount Amount无效 {invalid_cash7} 行（按0处理）；无效日期/交易金额可能无法计入。')
 
-            st.markdown('**计算规则：** 月毛利润 = 销售额 − Z1/KG退款 − TRADE DISCOUNT佣金 − SA广告费 − Cash Discount费用 − 采购成本 − 头程运费 − 售后费用。Z0与ZP只用于结算对账，不计入毛利润。')
+            st.markdown('**计算规则：** 月毛利润 = 销售额 − Z1/KG退款 − 平台佣金（TRADE DISCOUNT + Cash Discount）− SA广告费 − 采购成本 − 头程运费 − 售后费用。Z0与ZP只用于结算对账，不计入毛利润。')
             st.info('注意：销售与结算费用采用不同日期口径，因此这是月度经营管理毛利率，不是严格按订单逐笔匹配的会计毛利率。')
 
             # 原始销售额：销售表 Order Date
@@ -393,7 +393,7 @@ with tabs[6]:
 
             # Cash Discount Amount为独立费用列，可能与任意Doc Type并存，必须额外求和。
             cash_month7 = (rem_valid.groupby('Month', dropna=True)['Cash Discount Amount']
-                           .sum(min_count=1).fillna(0).rename('Cash Discount费用').reset_index())
+                           .sum(min_count=1).fillna(0).mul(-1).rename('Cash Discount佣金').reset_index())
 
             # 合并月份：包含只有费用、没有销售的月份
             month_index7 = pd.DataFrame({'Month': sorted(
@@ -404,9 +404,10 @@ with tabs[6]:
             fin7 = fin7.merge(cost_month7, on='Month', how='left')
             fin7 = fin7.merge(rem_month7, on='Month', how='left')
             fin7 = fin7.merge(cash_month7, on='Month', how='left')
-            for col in ['销售额', '销量', '退款费用', '平台佣金', '广告费用', 'Z0应付发票', 'ZP实际到账', '其他/对账', 'Cash Discount费用']:
+            for col in ['销售额', '销量', '退款费用', '平台佣金', '广告费用', 'Z0应付发票', 'ZP实际到账', '其他/对账', 'Cash Discount佣金']:
                 fin7[col] = fin7[col].fillna(0)
             fin7['成本完整'] = fin7['成本完整'].fillna(False)
+            fin7['平台佣金'] = fin7['平台佣金'] + fin7['Cash Discount佣金']
 
             st.subheader('1. 售后预算及实际费用设置')
             aftersale_rate7 = st.number_input(
@@ -430,7 +431,7 @@ with tabs[6]:
             fin7['售后费用口径'] = np.where(actual_after7.notna().to_numpy(), '实际录入', '预算估算')
 
             # 严格区分：没有销售、成本缺失、费用已发生但未有销售
-            expenses7 = ['退款费用', '平台佣金', '广告费用', 'Cash Discount费用', '采购成本', '头程运费', '售后费用']
+            expenses7 = ['退款费用', '平台佣金', '广告费用', '采购成本', '头程运费', '售后费用']
             fin7['总成本支出'] = fin7[expenses7].sum(axis=1, min_count=len(expenses7))
             fin7.loc[~fin7['成本完整'], '总成本支出'] = np.nan
             fin7['毛利润'] = fin7['销售额'] - fin7['总成本支出']
@@ -469,7 +470,7 @@ with tabs[6]:
             st.subheader('2. 月度毛利率与费用率明细')
             display7 = ['Month', '销售额', '销量', '退款费用', '退款费用率(%)',
                         '平台佣金', '平台佣金率(%)', '广告费用', '广告费用率(%)',
-                        'Cash Discount费用', 'Cash Discount费用率(%)',
+                        'Cash Discount佣金',
                         '采购成本', '采购成本率(%)', '头程运费', '头程运费率(%)',
                         '售后费用', '售后费用率(%)', '售后费用口径',
                         '总成本支出', '总成本率(%)', '毛利润', '毛利率(%)',
@@ -505,9 +506,9 @@ with tabs[6]:
 
             st.subheader('5. Remittance 交易类型与回款对账')
             reconciliation7 = view7[['Month', 'Z0应付发票', 'ZP实际到账',
-                                      '退款费用', '平台佣金', '广告费用', 'Cash Discount费用', '其他/对账']].copy()
+                                      '退款费用', '平台佣金', 'Cash Discount佣金', '广告费用', '其他/对账']].copy()
             table(reconciliation7)
-            st.caption('Cash Discount费用按 Cash Discount Amount 单独汇总，不与 Transaction Value 费用互斥；Z0、ZP仅展示原始有符号 Transaction Value 的合计；Z0负数并不意味着负销售额。不同月份的付款与发票可能跨期，不建议直接用 Z0 − ZP 作为损失。')
+            st.caption('Cash Discount佣金按 Cash Discount Amount 取反后汇总，并已包含在平台佣金中，不能再次作为独立成本扣除；Z0、ZP仅展示原始有符号 Transaction Value 的合计；Z0负数并不意味着负销售额。不同月份的付款与发票可能跨期，不建议直接用 Z0 − ZP 作为损失。')
             st.subheader('6. Remittance 费用分类明细')
             types7 = (rem_valid.groupby(['Month', 'Doc Type', '费用分类'], dropna=False)
                       .agg(记录数=('Transaction Value', 'size'),
